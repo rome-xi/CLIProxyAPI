@@ -73,7 +73,7 @@ func assertIssue4959LeadingUserContents(t *testing.T, contents []gjson.Result) {
 		t.Fatalf("contents too short: %d", len(contents))
 	}
 	leadingText := contents[0].Get("parts.0.text")
-	if contents[0].Get("role").String() != "user" || !leadingText.Exists() || leadingText.String() != "" {
+	if contents[0].Get("role").String() != "user" || !leadingText.Exists() || leadingText.String() != " " {
 		t.Fatalf("synthetic leading user missing: %s", contents[0].Raw)
 	}
 	if contents[1].Get("role").String() != "model" || !contentHasNamedPart(contents[1], "functionCall", "Bash") {
@@ -321,7 +321,7 @@ func TestAntigravityStreamPrependsLeadingUserForGemini(t *testing.T) {
 			t.Fatalf("upstream roles malformed: %s", body)
 		}
 		leadingText := contents[0].Get("parts.0.text")
-		if !leadingText.Exists() || leadingText.String() != "" {
+		if !leadingText.Exists() || leadingText.String() != " " {
 			t.Fatalf("synthetic leading user missing: %s", body)
 		}
 		if !contents[1].Get("parts.0.functionCall").Exists() || !contents[2].Get("parts.0.functionResponse").Exists() {
@@ -502,7 +502,7 @@ func TestAntigravityStreamPrependsLeadingUserAfterReplayInsertsFunctionCall(t *t
 		t.Fatalf("contents len = %d, want 3; body=%s", len(contents), body)
 	}
 	leadingText := contents[0].Get("parts.0.text")
-	if contents[0].Get("role").String() != "user" || !leadingText.Exists() || leadingText.String() != "" {
+	if contents[0].Get("role").String() != "user" || !leadingText.Exists() || leadingText.String() != " " {
 		t.Fatalf("synthetic leading user missing after replay insert: %s", contents[0].Raw)
 	}
 	if contents[1].Get("role").String() != "model" || contents[1].Get("parts.0.functionCall.id").String() != "call-1" {
@@ -730,7 +730,7 @@ func TestAntigravityCountTokensMatchesTargetLeadingUserPolicy(t *testing.T) {
 			}
 			if strings.HasPrefix(tt.wantRoles, "user,") {
 				text := contents[0].Get("parts.0.text")
-				if !text.Exists() || text.String() != "" {
+				if !text.Exists() || text.String() != " " {
 					t.Fatalf("synthetic countTokens user missing: %s", upstreamBody)
 				}
 			}
@@ -839,7 +839,7 @@ func TestAntigravityExecutorCountTokensReconstructsCompactedClaudeToolCall(t *te
 		t.Fatal("countTokens upstream body was not captured")
 	}
 	leadingText := gjson.GetBytes(upstreamBody, "request.contents.0.parts.0.text")
-	if gjson.GetBytes(upstreamBody, "request.contents.0.role").String() != "user" || !leadingText.Exists() || leadingText.String() != "" {
+	if gjson.GetBytes(upstreamBody, "request.contents.0.role").String() != "user" || !leadingText.Exists() || leadingText.String() != " " {
 		t.Fatalf("synthetic leading user missing after replay insert: %s", upstreamBody)
 	}
 	call := gjson.GetBytes(upstreamBody, "request.contents.1.parts.0")
@@ -1106,5 +1106,47 @@ func TestAntigravityExecutor_CacheModeSkipsPrecheck(t *testing.T) {
 	_, err := validateAntigravityRequestSignatures(context.Background(), "claude-sonnet-4-5-thinking", from, payload)
 	if err != nil {
 		t.Fatalf("cache mode should skip precheck, got: %v", err)
+	}
+}
+
+func TestAntigravityExecutorCountTokensStripsStatefulFields(t *testing.T) {
+	var upstreamBody []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != antigravityCountTokensPath {
+			t.Fatalf("path = %q, want %q", r.URL.Path, antigravityCountTokensPath)
+		}
+		body, errRead := io.ReadAll(r.Body)
+		if errRead != nil {
+			t.Fatalf("read countTokens body: %v", errRead)
+		}
+		upstreamBody = append([]byte(nil), body...)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"totalTokens":42}`))
+	}))
+	defer server.Close()
+
+	payload := []byte(`{"contents":[{"role":"user","parts":[{"text":"hello"}]}],"toolConfig":{"functionCallingConfig":{"mode":"AUTO"}},"labels":{"source":"ide"},"sessionId":"session-123"}`)
+	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+	_, errCount := exec.CountTokens(context.Background(), testAntigravityAuth(server.URL), cliproxyexecutor.Request{
+		Model:   "gemini-3.6-flash-high",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat:   sdktranslator.FormatGemini,
+		ResponseFormat: sdktranslator.FormatGemini,
+	})
+	if errCount != nil {
+		t.Fatalf("CountTokens() error = %v", errCount)
+	}
+	if len(upstreamBody) == 0 {
+		t.Fatal("countTokens upstream body was not captured")
+	}
+	if gjson.GetBytes(upstreamBody, "request.toolConfig").Exists() {
+		t.Fatalf("upstream countTokens body retained request.toolConfig: %s", upstreamBody)
+	}
+	if gjson.GetBytes(upstreamBody, "request.labels").Exists() {
+		t.Fatalf("upstream countTokens body retained request.labels: %s", upstreamBody)
+	}
+	if gjson.GetBytes(upstreamBody, "request.sessionId").Exists() {
+		t.Fatalf("upstream countTokens body retained request.sessionId: %s", upstreamBody)
 	}
 }
