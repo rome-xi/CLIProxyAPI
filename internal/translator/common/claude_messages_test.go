@@ -161,3 +161,114 @@ func TestAlignClaudeToolResults(t *testing.T) {
 		}
 	})
 }
+
+func TestRepairDanglingClaudeToolUses(t *testing.T) {
+	const interruptText = "[operation interrupted by user]"
+
+	t.Run("prepends synth results into next user text", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"cmd":"curl"}}]},{"role":"user","content":"fix the regression"}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := gjson.GetBytes(got, "messages").Array()
+		if len(messages) != 2 {
+			t.Fatalf("message count = %d, want 2: %s", len(messages), got)
+		}
+		blocks := messages[1].Get("content").Array()
+		if len(blocks) != 2 {
+			t.Fatalf("user blocks = %d, want 2: %s", len(blocks), messages[1].Raw)
+		}
+		assertInterruptedToolResult(t, blocks[0], "t1", interruptText)
+		if blocks[1].Get("type").String() != "text" || blocks[1].Get("text").String() != "fix the regression" {
+			t.Fatalf("user text not preserved: %s", blocks[1].Raw)
+		}
+	})
+
+	t.Run("trailing assistant inserts synth user", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t_last","name":"Read","input":{}}]}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := gjson.GetBytes(got, "messages").Array()
+		if len(messages) != 2 {
+			t.Fatalf("message count = %d, want 2: %s", len(messages), got)
+		}
+		if messages[1].Get("role").String() != "user" {
+			t.Fatalf("inserted role = %q, want user", messages[1].Get("role").String())
+		}
+		blocks := messages[1].Get("content").Array()
+		if len(blocks) != 1 {
+			t.Fatalf("inserted blocks = %d, want 1: %s", len(blocks), messages[1].Raw)
+		}
+		assertInterruptedToolResult(t, blocks[0], "t_last", interruptText)
+	})
+
+	t.Run("complete pairing is unchanged", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"done1","name":"Bash"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"done1","content":"success"}]}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		if string(got) != string(input) {
+			t.Fatalf("complete pairing mutated:\n got %s\nwant %s", got, input)
+		}
+	})
+
+	t.Run("partial parallel fills missing ids only", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"p1","name":"Bash"},{"type":"tool_use","id":"p2","name":"Bash"}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"p1","content":"p1 done"}]}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := gjson.GetBytes(got, "messages").Array()
+		if len(messages) != 2 {
+			t.Fatalf("message count = %d, want 2: %s", len(messages), got)
+		}
+		blocks := messages[1].Get("content").Array()
+		if len(blocks) != 2 {
+			t.Fatalf("user blocks = %d, want 2: %s", len(blocks), messages[1].Raw)
+		}
+		assertInterruptedToolResult(t, blocks[0], "p2", interruptText)
+		if blocks[1].Get("tool_use_id").String() != "p1" || blocks[1].Get("content").String() != "p1 done" {
+			t.Fatalf("existing p1 result mutated: %s", blocks[1].Raw)
+		}
+		if blocks[1].Get("is_error").Bool() {
+			t.Fatalf("existing p1 result should not be marked is_error: %s", blocks[1].Raw)
+		}
+	})
+
+	t.Run("consecutive assistants insert synth user between", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"mid","name":"Bash"}]},{"role":"assistant","content":[{"type":"text","text":"continue"}]}]}`)
+		got := RepairDanglingClaudeToolUses(input)
+		messages := gjson.GetBytes(got, "messages").Array()
+		if len(messages) != 3 {
+			t.Fatalf("message count = %d, want 3: %s", len(messages), got)
+		}
+		if messages[1].Get("role").String() != "user" {
+			t.Fatalf("inserted role = %q, want user", messages[1].Get("role").String())
+		}
+		blocks := messages[1].Get("content").Array()
+		if len(blocks) != 1 {
+			t.Fatalf("inserted blocks = %d, want 1: %s", len(blocks), messages[1].Raw)
+		}
+		assertInterruptedToolResult(t, blocks[0], "mid", interruptText)
+		if messages[2].Get("role").String() != "assistant" || messages[2].Get("content.0.text").String() != "continue" {
+			t.Fatalf("trailing assistant mutated: %s", messages[2].Raw)
+		}
+	})
+
+	t.Run("idempotent after repair", func(t *testing.T) {
+		input := []byte(`{"messages":[{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash"}]},{"role":"user","content":"stop"}]}`)
+		once := RepairDanglingClaudeToolUses(input)
+		twice := RepairDanglingClaudeToolUses(once)
+		if string(twice) != string(once) {
+			t.Fatalf("second repair mutated:\n once %s\n twice %s", once, twice)
+		}
+	})
+}
+
+func assertInterruptedToolResult(t *testing.T, block gjson.Result, toolUseID, content string) {
+	t.Helper()
+	if block.Get("type").String() != "tool_result" {
+		t.Fatalf("type = %q, want tool_result: %s", block.Get("type").String(), block.Raw)
+	}
+	if block.Get("tool_use_id").String() != toolUseID {
+		t.Fatalf("tool_use_id = %q, want %s: %s", block.Get("tool_use_id").String(), toolUseID, block.Raw)
+	}
+	if block.Get("content").String() != content {
+		t.Fatalf("content = %q, want %s: %s", block.Get("content").String(), content, block.Raw)
+	}
+	if !block.Get("is_error").Bool() {
+		t.Fatalf("is_error = %v, want true: %s", block.Get("is_error").Value(), block.Raw)
+	}
+}
