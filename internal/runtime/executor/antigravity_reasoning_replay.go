@@ -254,7 +254,7 @@ func prepareAntigravityGeminiReasoningReplayPayload(ctx context.Context, modelNa
 		// committed. Degrade those calls instead of killing the conversation.
 		degradedPayload, degradedCount := degradeAntigravityClaudeToolProvenanceIDs(updated)
 		log.Warnf("antigravity executor: replay state missing for %d tool ID(s); rewriting them to synthetic IDs and continuing without reasoning replay for those calls", degradedCount)
-		updated = degradedPayload
+		updated = normalizeAntigravityGeminiFunctionResponseRoles(degradedPayload)
 	}
 	// An identity-only restore drops the cached signature, which can leave a model
 	// turn's first function call unsigned. Gemini rejects that, so re-assert the
@@ -1226,33 +1226,49 @@ func antigravitySyntheticToolCallID(reservedID string) string {
 // ledger miss instead of failing closed forever.
 //
 // The same reserved ID always maps to the same synthetic ID, so functionCall and
-// functionResponse stay paired. Whatever signature the client carried in-band is
-// kept: Gemini validates a thought signature's own integrity, not its binding to
-// the call ID or the surrounding history, so rewriting the ID does not invalidate
-// it. Calls left with no signature at all get the leading bypass sentinel from
-// antigravityRepairUnsignedFirstFunctionCalls. Every other part is left alone,
-// preserving the native "1 signed + N unsigned" parallel-call shape.
+// functionResponse stay paired. Stale thought signatures on degraded calls are replaced
+// with the bypass sentinel (GeminiSkipThoughtSignatureValidator) to prevent signature
+// validation failures across accounts or synthetic IDs. Calls left with no signature at
+// all get the leading bypass sentinel from antigravityRepairUnsignedFirstFunctionCalls.
+// Every other part is left alone, preserving the native parallel-call shape.
 func degradeAntigravityClaudeToolProvenanceIDs(payload []byte) ([]byte, int) {
 	contents := util.GetGJSONBytesNoCopy(payload, "request.contents")
 	if !contents.IsArray() {
 		return payload, 0
 	}
-	out := payload
-	degraded := 0
-	for ci, content := range contents.Array() {
+	type partReplacement struct {
+		start int
+		end   int
+		data  []byte
+	}
+	replacements := make([]partReplacement, 0)
+	for _, content := range contents.Array() {
 		parts := content.Get("parts")
 		if !parts.IsArray() {
 			continue
 		}
-		for pi, part := range parts.Array() {
-			partPath := fmt.Sprintf("request.contents.%d.parts.%d", ci, pi)
+		seenFunctionCallInTurn := false
+		for _, part := range parts.Array() {
 			if fc := part.Get("functionCall"); fc.Exists() {
+				isFirstFC := !seenFunctionCallInTurn
+				seenFunctionCallInTurn = true
 				id := strings.TrimSpace(fc.Get("id").String())
 				if !util.IsGeminiClaudeToolUseID(id) {
 					continue
 				}
-				out, _ = sjson.SetBytes(out, partPath+".functionCall.id", antigravitySyntheticToolCallID(id))
-				degraded++
+				updatedPart, _ := sjson.SetBytes([]byte(part.Raw), "functionCall.id", antigravitySyntheticToolCallID(id))
+				if part.Get("thoughtSignature").Exists() && part.Get("thoughtSignature").String() != "" {
+					if isFirstFC {
+						updatedPart, _ = sjson.SetBytes(updatedPart, "thoughtSignature", internalsignature.GeminiSkipThoughtSignatureValidator)
+					} else {
+						updatedPart, _ = sjson.DeleteBytes(updatedPart, "thoughtSignature")
+					}
+				}
+				replacements = append(replacements, partReplacement{
+					start: part.Index,
+					end:   part.Index + len(part.Raw),
+					data:  updatedPart,
+				})
 				continue
 			}
 			if fr := part.Get("functionResponse"); fr.Exists() {
@@ -1260,12 +1276,36 @@ func degradeAntigravityClaudeToolProvenanceIDs(payload []byte) ([]byte, int) {
 				if !util.IsGeminiClaudeToolUseID(id) {
 					continue
 				}
-				out, _ = sjson.SetBytes(out, partPath+".functionResponse.id", antigravitySyntheticToolCallID(id))
-				degraded++
+				updatedPart, _ := sjson.SetBytes([]byte(part.Raw), "functionResponse.id", antigravitySyntheticToolCallID(id))
+				replacements = append(replacements, partReplacement{
+					start: part.Index,
+					end:   part.Index + len(part.Raw),
+					data:  updatedPart,
+				})
 			}
 		}
 	}
-	return out, degraded
+	if len(replacements) == 0 {
+		return payload, 0
+	}
+
+	// Mutate each small part independently, then copy the full request only once.
+	outputSize := len(payload)
+	for _, replacement := range replacements {
+		outputSize += len(replacement.data) - (replacement.end - replacement.start)
+	}
+	out := make([]byte, 0, outputSize)
+	last := 0
+	for _, replacement := range replacements {
+		if replacement.start <= last || replacement.end > len(payload) {
+			return payload, 0
+		}
+		out = append(out, payload[last:replacement.start]...)
+		out = append(out, replacement.data...)
+		last = replacement.end
+	}
+	out = append(out, payload[last:]...)
+	return out, len(replacements)
 }
 
 // antigravityRepairUnsignedFirstFunctionCalls restores Gemini's bypass sentinel on
