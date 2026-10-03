@@ -29,6 +29,7 @@ type Params struct {
 	ToolNameMap      map[string]string
 	SanitizedNameMap map[string]string
 	SawToolCall      bool
+	SawVisibleText   bool
 	HasFinalEvents   bool
 }
 
@@ -161,6 +162,9 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 					}
 					appendSignatureDelta(thoughtSignatureResult.String())
 				} else {
+					if partTextResult.String() != "" {
+						(*param).(*Params).SawVisibleText = true
+					}
 					// Process regular text content (user-visible output)
 					// Continue existing text block
 					if (*param).(*Params).ResponseType == 1 {
@@ -259,7 +263,9 @@ func ConvertGeminiResponseToClaude(_ context.Context, _ string, originalRequestR
 			if (*param).(*Params).SawToolCall {
 				template = []byte(`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
 			} else if finish := gjson.GetBytes(rawJSON, "candidates.0.finishReason"); finish.Exists() && finish.String() == "MAX_TOKENS" {
-				template = []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+				if (*param).(*Params).SawVisibleText {
+					template = []byte(`{"type":"message_delta","delta":{"stop_reason":"max_tokens","stop_sequence":null},"usage":{"input_tokens":0,"output_tokens":0}}`)
+				}
 			}
 
 			thoughtsTokenCount := usageResult.Get("thoughtsTokenCount").Int()
@@ -321,6 +327,7 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 	thinkingBuilder := strings.Builder{}
 	var thinkingSignature string
 	toolIDCounter := 0
+	hasVisibleText := false
 	hasToolCall := false
 	var blocks [][]byte
 
@@ -372,6 +379,9 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 					thinkingBuilder.WriteString(text.String())
 					continue
 				}
+				if text.String() != "" {
+					hasVisibleText = true
+				}
 				flushThinking()
 				textBuilder.WriteString(text.String())
 				continue
@@ -414,7 +424,11 @@ func ConvertGeminiResponseToClaudeNonStream(_ context.Context, _ string, origina
 		if finish := root.Get("candidates.0.finishReason"); finish.Exists() {
 			switch finish.String() {
 			case "MAX_TOKENS":
-				stopReason = "max_tokens"
+				if hasVisibleText {
+					stopReason = "max_tokens"
+				} else {
+					stopReason = "end_turn"
+				}
 			case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN":
 				stopReason = "end_turn"
 			default:

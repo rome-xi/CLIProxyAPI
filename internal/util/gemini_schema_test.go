@@ -2972,3 +2972,107 @@ func TestSanitizeArrayItems_PreservesItemsForUppercaseArrayType(t *testing.T) {
 		})
 	}
 }
+
+func TestPrefixItemsSchemaRewrite(t *testing.T) {
+	t.Run("single_tuple_element", func(t *testing.T) {
+		input := `{
+			"type": "object",
+			"properties": {
+				"tags": {
+					"type": "array",
+					"prefixItems": [{"type": "string"}]
+				}
+			}
+		}`
+		got := CleanJSONSchemaForAntigravity(input)
+		parsed := gjson.Parse(got)
+		if parsed.Get("properties.tags.prefixItems").Exists() {
+			t.Fatalf("prefixItems should be removed: %s", got)
+		}
+		itemsType := parsed.Get("properties.tags.items.type").String()
+		if !strings.EqualFold(itemsType, "string") {
+			t.Fatalf("items.type = %q, want string: %s", itemsType, got)
+		}
+	})
+
+	t.Run("multiple_tuple_elements", func(t *testing.T) {
+		input := `{
+			"type": "object",
+			"properties": {
+				"coords": {
+					"type": "array",
+					"prefixItems": [
+						{"type": "string"},
+						{"type": "number"}
+					]
+				}
+			}
+		}`
+		got := CleanJSONSchemaForAntigravity(input)
+		parsed := gjson.Parse(got)
+		if parsed.Get("properties.coords.prefixItems").Exists() {
+			t.Fatalf("prefixItems should be removed: %s", got)
+		}
+		anyOf := parsed.Get("properties.coords.items.anyOf").Array()
+		if len(anyOf) != 2 {
+			t.Fatalf("expected items.anyOf with 2 elements, got %d: %s", len(anyOf), got)
+		}
+		if !strings.EqualFold(anyOf[0].Get("type").String(), "string") || !strings.EqualFold(anyOf[1].Get("type").String(), "number") {
+			t.Fatalf("unexpected items.anyOf contents: %s", got)
+		}
+	})
+
+	t.Run("items_already_present", func(t *testing.T) {
+		input := `{
+			"type": "object",
+			"properties": {
+				"tags": {
+					"type": "array",
+					"items": {"type": "boolean"},
+					"prefixItems": [{"type": "string"}]
+				}
+			}
+		}`
+		got := CleanJSONSchemaForAntigravity(input)
+		parsed := gjson.Parse(got)
+		if parsed.Get("properties.tags.prefixItems").Exists() {
+			t.Fatalf("prefixItems should be removed: %s", got)
+		}
+		itemsType := parsed.Get("properties.tags.items.type").String()
+		if !strings.EqualFold(itemsType, "boolean") {
+			t.Fatalf("existing items should not be clobbered: %s", got)
+		}
+	})
+
+	t.Run("propertyNames_and_uniqueItems_compatibility", func(t *testing.T) {
+		input := `{
+			"type": "object",
+			"propertyNames": {"pattern": "^[a-z]+$"},
+			"properties": {
+				"list": {
+					"type": "array",
+					"uniqueItems": true,
+					"prefixItems": [{"type": "string"}]
+				}
+			}
+		}`
+		got := CleanJSONSchemaForAntigravity(input)
+		parsed := gjson.Parse(got)
+		if parsed.Get("propertyNames").Exists() {
+			t.Fatalf("propertyNames should be stripped: %s", got)
+		}
+		if parsed.Get("properties.list.uniqueItems").Exists() {
+			t.Fatalf("uniqueItems keyword should be stripped: %s", got)
+		}
+		desc := parsed.Get("properties.list.description").String()
+		if !strings.Contains(desc, "uniqueItems") {
+			t.Fatalf("uniqueItems should be preserved as description hint: %s", got)
+		}
+		if parsed.Get("properties.list.prefixItems").Exists() {
+			t.Fatalf("prefixItems should be removed: %s", got)
+		}
+		if !strings.EqualFold(parsed.Get("properties.list.items.type").String(), "string") {
+			t.Fatalf("items.type should be string: %s", got)
+		}
+	})
+}

@@ -352,6 +352,55 @@ func newAntigravityStatusErr(statusCode int, body []byte) statusErr {
 	}
 	return err
 }
+
+func isAntigravityGeoError(statusCode int, body []byte) bool {
+	if statusCode != http.StatusBadRequest || len(body) == 0 {
+		return false
+	}
+	codeResult := gjson.GetBytes(body, "error.code")
+	if codeResult.Exists() && codeResult.Int() != 400 {
+		return false
+	}
+	statusResult := gjson.GetBytes(body, "error.status")
+	if statusResult.Exists() && statusResult.String() != "" && !strings.EqualFold(statusResult.String(), "FAILED_PRECONDITION") {
+		return false
+	}
+
+	errMsg := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "error.message").String()))
+	if errMsg == "" {
+		errMsg = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "message").String()))
+	}
+	if errMsg == "" {
+		errMsg = strings.ToLower(string(body))
+	}
+	if !strings.Contains(errMsg, "user location is not supported") && !strings.Contains(errMsg, "for the api use.") {
+		return false
+	}
+
+	detailsResult := gjson.GetBytes(body, "error.details")
+	if detailsResult.IsArray() {
+		for _, d := range detailsResult.Array() {
+			reason := strings.ToUpper(strings.TrimSpace(d.Get("reason").String()))
+			if reason != "" && !strings.Contains(reason, "LOCATION") && !strings.Contains(reason, "GEO") && !strings.Contains(reason, "REGION") {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func newAntigravityGeoStatusErr(body []byte) statusErr {
+	errMsg := strings.TrimSpace(gjson.GetBytes(body, "error.message").String())
+	if errMsg == "" {
+		errMsg = "User location is not supported for the API use."
+	}
+	return statusErr{
+		code:             http.StatusForbidden,
+		msg:              fmt.Sprintf(`{"error":{"message":%q,"type":"permission_error","code":"regional_restriction"}}`, errMsg),
+		retryAfter:       nil,
+		credentialScoped: true,
+	}
+}
 func (e *AntigravityExecutor) maybeRefreshAntigravityCreditsHint(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) {
 	if e == nil || auth == nil || !antigravityCreditsRetryEnabled(e.cfg) || antigravityCoolingDisabled(auth, e.cfg) {
 		return

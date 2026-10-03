@@ -27,6 +27,7 @@ type convertCliResponseToOpenAIChatParams struct {
 	FunctionIndex        int
 	SawResponse          bool   // Tracks whether any upstream response chunk was seen
 	SawToolCall          bool   // Tracks if any tool call was seen in the entire stream
+	SawVisibleText       bool   // Tracks if any non-thought non-empty text was seen
 	SawFinishReason      bool   // Tracks whether finish_reason has been emitted
 	UpstreamFinishReason string // Caches the upstream finish reason for final chunk
 	ModelVersion         string
@@ -169,6 +170,9 @@ func ConvertAntigravityResponseToOpenAI(_ context.Context, _ string, originalReq
 				if partResult.Get("thought").Bool() {
 					template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", textContent)
 				} else {
+					if textContent != "" {
+						params.SawVisibleText = true
+					}
 					template, _ = sjson.SetBytes(template, "choices.0.delta.content", textContent)
 				}
 				template, _ = sjson.SetBytes(template, "choices.0.delta.role", "assistant")
@@ -272,7 +276,11 @@ func resolveOpenAIFinishReason(params *convertCliResponseToOpenAIChatParams) (fi
 	case params.SawToolCall:
 		finishReason = "tool_calls"
 	case params.UpstreamFinishReason == "MAX_TOKENS":
-		finishReason = "max_tokens"
+		if params.SawVisibleText {
+			finishReason = "max_tokens"
+		} else {
+			finishReason = "stop"
+		}
 	default:
 		finishReason = "stop"
 	}

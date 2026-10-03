@@ -138,6 +138,7 @@ func cleanJSONSchema(jsonStr string, options jsonSchemaCleanOptions) string {
 	if options.flattenUnions {
 		jsonStr = flattenAnyOfOneOf(jsonStr)
 	}
+	jsonStr = rewritePrefixItems(jsonStr)
 	jsonStr = flattenTypeArrays(jsonStr, options.antigravitySemantics)
 
 	// Phase 3: Cleanup
@@ -488,8 +489,10 @@ func repairSchemaNode(node map[string]any, addMissingArrayItems bool) (map[strin
 	if addMissingArrayItems {
 		if isArrayDeclaredType(clone["type"]) {
 			if _, hasItems := clone["items"]; !hasItems {
-				clone["items"] = map[string]any{"type": "string"}
-				modified = true
+				if _, hasPrefix := clone["prefixItems"]; !hasPrefix {
+					clone["items"] = map[string]any{"type": "string"}
+					modified = true
+				}
 			}
 		} else if _, hasItems := clone["items"]; hasItems {
 			if clone["type"] == nil || clone["type"] == "" {
@@ -1281,6 +1284,48 @@ func flattenTypeArrays(jsonStr string, preserveNativeNullable bool) string {
 	return jsonStr
 }
 
+func rewritePrefixItems(jsonStr string) string {
+	paths := findPaths(jsonStr, "prefixItems")
+	sortByDepth(paths)
+
+	for _, p := range paths {
+		prefixItemsResult := gjson.Get(jsonStr, p)
+		if !prefixItemsResult.Exists() {
+			continue
+		}
+		parentPath := trimSuffix(p, ".prefixItems")
+		if isPropertyDefinition(parentPath) {
+			continue
+		}
+
+		existingItems := gjson.Get(jsonStr, joinPath(parentPath, "items"))
+		if existingItems.Exists() {
+			jsonStr, _ = sjson.Delete(jsonStr, p)
+			continue
+		}
+
+		if prefixItemsResult.IsArray() {
+			elements := prefixItemsResult.Array()
+			switch len(elements) {
+			case 0:
+				jsonStr, _ = sjson.Delete(jsonStr, p)
+			case 1:
+				updated, _ := sjson.SetRawBytes([]byte(jsonStr), joinPath(parentPath, "items"), []byte(elements[0].Raw))
+				jsonStr = string(updated)
+				jsonStr, _ = sjson.Delete(jsonStr, p)
+			default:
+				itemsRaw := fmt.Sprintf(`{"anyOf":%s}`, prefixItemsResult.Raw)
+				updated, _ := sjson.SetRawBytes([]byte(jsonStr), joinPath(parentPath, "items"), []byte(itemsRaw))
+				jsonStr = string(updated)
+				jsonStr, _ = sjson.Delete(jsonStr, p)
+			}
+		} else {
+			jsonStr, _ = sjson.Delete(jsonStr, p)
+		}
+	}
+	return jsonStr
+}
+
 func removeUnsupportedKeywords(jsonStr string, options jsonSchemaCleanOptions) string {
 	keywords := append(constraintKeywords(options),
 		"$schema", "$defs", "definitions", "const", "$ref", "$id", "id", "additionalProperties",
@@ -1288,7 +1333,7 @@ func removeUnsupportedKeywords(jsonStr string, options jsonSchemaCleanOptions) s
 		"propertyNames", "patternProperties", // Gemini doesn't support these schema keywords
 		"if", "then", "else",
 		"$comment", "enumDescriptions", "enumTitles", "prefill", "deprecated", "encrypted", // Schema metadata fields unsupported by Gemini
-		"additionalItems", "unevaluatedProperties", "unevaluatedItems", "contentSchema",
+		"additionalItems", "prefixItems", "unevaluatedProperties", "unevaluatedItems", "contentSchema",
 	)
 	if options.antigravitySemantics {
 		keywords = append(keywords, "not")

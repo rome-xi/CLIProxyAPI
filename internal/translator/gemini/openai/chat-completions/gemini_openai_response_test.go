@@ -1,7 +1,9 @@
 package chat_completions
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
@@ -125,4 +127,69 @@ func TestConvertGeminiResponseToOpenAINonStream_TextPrecedenceOverAudioTranscrip
 	if !content.Exists() || content.String() != "explicit text" {
 		t.Fatalf("expected content to prioritize explicit text, got %v. Output: %s", content.Raw, result)
 	}
+}
+
+func TestGeminiOpenAIMaxTokensHandling(t *testing.T) {
+	t.Run("nonstream_thinking_only", func(t *testing.T) {
+		resp := []byte(`{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]},"finishReason":"MAX_TOKENS"}]}`)
+		out := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, resp, nil)
+		if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "stop" {
+			t.Fatalf("finish_reason = %q, want stop: %s", got, out)
+		}
+	})
+
+	t.Run("nonstream_visible_text", func(t *testing.T) {
+		resp := []byte(`{"candidates":[{"content":{"parts":[{"text":"visible text"}]},"finishReason":"MAX_TOKENS"}]}`)
+		out := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, resp, nil)
+		if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "max_tokens" {
+			t.Fatalf("finish_reason = %q, want max_tokens: %s", got, out)
+		}
+	})
+
+	t.Run("nonstream_tool_calls_priority", func(t *testing.T) {
+		resp := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"test"}}}]},"finishReason":"MAX_TOKENS"}]}`)
+		out := ConvertGeminiResponseToOpenAINonStream(context.Background(), "model", nil, nil, resp, nil)
+		if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "tool_calls" {
+			t.Fatalf("finish_reason = %q, want tool_calls: %s", got, out)
+		}
+	})
+
+	t.Run("stream_thinking_only", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]}}]}`)
+		chunk2 := []byte(`{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}`)
+		_ = ConvertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, chunk1, &param)
+		out := ConvertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, chunk2, &param)
+		out = append(out, ConvertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, []byte("[DONE]"), &param)...)
+		joined := string(bytes.Join(out, nil))
+		if !strings.Contains(joined, `"finish_reason":"stop"`) {
+			t.Fatalf("stream should emit finish_reason stop: %s", joined)
+		}
+	})
+
+	t.Run("stream_visible_text", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"candidates":[{"content":{"parts":[{"text":"visible text"}]}}]}`)
+		chunk2 := []byte(`{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}`)
+		_ = ConvertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, chunk1, &param)
+		out := ConvertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, chunk2, &param)
+		out = append(out, ConvertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, []byte("[DONE]"), &param)...)
+		joined := string(bytes.Join(out, nil))
+		if !strings.Contains(joined, `"finish_reason":"max_tokens"`) {
+			t.Fatalf("stream should emit finish_reason max_tokens: %s", joined)
+		}
+	})
+
+	t.Run("stream_tool_calls_priority", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"test"}}}]}}]}`)
+		chunk2 := []byte(`{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+		_ = ConvertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, chunk1, &param)
+		out := ConvertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, chunk2, &param)
+		out = append(out, ConvertGeminiResponseToOpenAI(context.Background(), "model", nil, nil, []byte("[DONE]"), &param)...)
+		joined := string(bytes.Join(out, nil))
+		if !strings.Contains(joined, `"finish_reason":"tool_calls"`) {
+			t.Fatalf("stream should emit finish_reason tool_calls: %s", joined)
+		}
+	})
 }

@@ -171,6 +171,23 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		}
 	}
 
+	if isAntigravityGeoError(httpResp.StatusCode, bodyBytes) {
+		closeAntigravityAuthIdleTransports(auth)
+		cooldownDuration := 30 * time.Second
+		if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil && *retryAfter > 0 {
+			cooldownDuration = *retryAfter
+		}
+		if !antigravityCoolingDisabled(auth, e.cfg) {
+			if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), cooldownDuration); errMarkCooldown != nil {
+				err = homeKVUnavailableStatusErr(errMarkCooldown)
+				return resp, err
+			}
+			log.Debugf("antigravity executor: geo restriction cooldown (%s) for model %s recorded", cooldownDuration, baseModel)
+		}
+		err = newAntigravityGeoStatusErr(bodyBytes)
+		return resp, err
+	}
+
 	if httpResp.StatusCode < http.StatusOK || httpResp.StatusCode >= http.StatusMultipleChoices {
 		log.Debugf("antigravity executor: upstream error status: %d, body: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), bodyBytes))
 		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
@@ -385,6 +402,23 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 				}
 				// No credits logic - just fall through to error return below
 			}
+		}
+
+		if isAntigravityGeoError(httpResp.StatusCode, bodyBytes) {
+			closeAntigravityAuthIdleTransports(auth)
+			cooldownDuration := 30 * time.Second
+			if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil && *retryAfter > 0 {
+				cooldownDuration = *retryAfter
+			}
+			if !antigravityCoolingDisabled(auth, e.cfg) {
+				if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), cooldownDuration); errMarkCooldown != nil {
+					err = homeKVUnavailableStatusErr(errMarkCooldown)
+					return resp, err
+				}
+				log.Debugf("antigravity executor: geo restriction cooldown (%s) for model %s recorded", cooldownDuration, baseModel)
+			}
+			err = newAntigravityGeoStatusErr(bodyBytes)
+			return resp, err
 		}
 
 		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {

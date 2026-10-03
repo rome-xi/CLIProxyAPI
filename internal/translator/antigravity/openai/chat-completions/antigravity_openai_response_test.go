@@ -1,7 +1,9 @@
 package chat_completions
 
 import (
+	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
@@ -316,4 +318,69 @@ func TestConvertAntigravityResponseToOpenAINonStreamIncludesReasoningContent(t *
 	if got := gjson.GetBytes(output, "usage.completion_tokens_details.reasoning_tokens").Int(); got != 42 {
 		t.Fatalf("reasoning_tokens = %d, want 42. Output: %s", got, output)
 	}
+}
+
+func TestAntigravityOpenAIMaxTokensHandling(t *testing.T) {
+	t.Run("nonstream_thinking_only", func(t *testing.T) {
+		resp := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]},"finishReason":"MAX_TOKENS"}]}}`)
+		out := ConvertAntigravityResponseToOpenAINonStream(context.Background(), "gemini-3-flash-agent", nil, nil, resp, nil)
+		if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "stop" {
+			t.Fatalf("finish_reason = %q, want stop: %s", got, out)
+		}
+	})
+
+	t.Run("nonstream_visible_text", func(t *testing.T) {
+		resp := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"visible text"}]},"finishReason":"MAX_TOKENS"}]}}`)
+		out := ConvertAntigravityResponseToOpenAINonStream(context.Background(), "gemini-3-flash-agent", nil, nil, resp, nil)
+		if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "max_tokens" {
+			t.Fatalf("finish_reason = %q, want max_tokens: %s", got, out)
+		}
+	})
+
+	t.Run("nonstream_tool_calls_priority", func(t *testing.T) {
+		resp := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"test"}}}]},"finishReason":"MAX_TOKENS"}]}}`)
+		out := ConvertAntigravityResponseToOpenAINonStream(context.Background(), "gemini-3-flash-agent", nil, nil, resp, nil)
+		if got := gjson.GetBytes(out, "choices.0.finish_reason").String(); got != "tool_calls" {
+			t.Fatalf("finish_reason = %q, want tool_calls: %s", got, out)
+		}
+	})
+
+	t.Run("stream_thinking_only", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]}}]}}`)
+		chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+		_ = ConvertAntigravityResponseToOpenAI(context.Background(), "gemini-3-flash-agent", nil, nil, chunk1, &param)
+		out := ConvertAntigravityResponseToOpenAI(context.Background(), "gemini-3-flash-agent", nil, nil, chunk2, &param)
+		out = append(out, ConvertAntigravityResponseToOpenAI(context.Background(), "gemini-3-flash-agent", nil, nil, []byte("[DONE]"), &param)...)
+		joined := string(bytes.Join(out, nil))
+		if !strings.Contains(joined, `"finish_reason":"stop"`) {
+			t.Fatalf("stream should emit finish_reason stop: %s", joined)
+		}
+	})
+
+	t.Run("stream_visible_text", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"visible text"}]}}]}}`)
+		chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+		_ = ConvertAntigravityResponseToOpenAI(context.Background(), "gemini-3-flash-agent", nil, nil, chunk1, &param)
+		out := ConvertAntigravityResponseToOpenAI(context.Background(), "gemini-3-flash-agent", nil, nil, chunk2, &param)
+		out = append(out, ConvertAntigravityResponseToOpenAI(context.Background(), "gemini-3-flash-agent", nil, nil, []byte("[DONE]"), &param)...)
+		joined := string(bytes.Join(out, nil))
+		if !strings.Contains(joined, `"finish_reason":"max_tokens"`) {
+			t.Fatalf("stream should emit finish_reason max_tokens: %s", joined)
+		}
+	})
+
+	t.Run("stream_tool_calls_priority", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"test"}}}]}}]}}`)
+		chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+		_ = ConvertAntigravityResponseToOpenAI(context.Background(), "gemini-3-flash-agent", nil, nil, chunk1, &param)
+		out := ConvertAntigravityResponseToOpenAI(context.Background(), "gemini-3-flash-agent", nil, nil, chunk2, &param)
+		out = append(out, ConvertAntigravityResponseToOpenAI(context.Background(), "gemini-3-flash-agent", nil, nil, []byte("[DONE]"), &param)...)
+		joined := string(bytes.Join(out, nil))
+		if !strings.Contains(joined, `"finish_reason":"tool_calls"`) {
+			t.Fatalf("stream should emit finish_reason tool_calls: %s", joined)
+		}
+	})
 }

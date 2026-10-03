@@ -75,6 +75,7 @@ type Params struct {
 	CachedTokenCount     int64  // Cached content token count (indicates prompt caching)
 	HasSentFinalEvents   bool   // Indicates if final content/message events have been sent
 	HasToolUse           bool   // Indicates if tool use was observed in the stream
+	HasVisibleText       bool   // Indicates if non-empty non-thought text was emitted
 	HasContent           bool   // Tracks whether any content (text, thinking, or tool use) has been output
 	HasSemanticContent   bool
 	LastSemanticKind     string
@@ -336,6 +337,7 @@ func ConvertAntigravityResponseToClaude(ctx context.Context, _ string, originalR
 						params.HasContent = true
 					}
 					if partText != "" {
+						params.HasVisibleText = true
 						params.HasSemanticContent = true
 						params.LastSemanticKind = geminiClaudeCarrierText
 						if signatureTargetsVisibleText {
@@ -505,7 +507,10 @@ func resolveStopReason(params *Params) string {
 
 	switch params.FinishReason {
 	case "MAX_TOKENS":
-		return "max_tokens"
+		if params.HasVisibleText {
+			return "max_tokens"
+		}
+		return "end_turn"
 	case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN":
 		return "end_turn"
 	}
@@ -574,6 +579,7 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 	thinkingSignatureDirection := geminiClaudeCarrierStandalone
 	thinkingSignatureTargetKind := geminiClaudeCarrierText
 	toolIDCounter := 0
+	hasVisibleText := false
 	hasToolCall := false
 	hasSemanticContent := false
 	lastSemanticKind := geminiClaudeCarrierAny
@@ -712,6 +718,7 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 				}
 			}
 			if text.Exists() && text.String() != "" {
+				hasVisibleText = true
 				flushThinking()
 				textBuilder.WriteString(text.String())
 				hasSemanticContent = true
@@ -737,7 +744,11 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 		if finish := root.Get("response.candidates.0.finishReason"); finish.Exists() {
 			switch finish.String() {
 			case "MAX_TOKENS":
-				stopReason = "max_tokens"
+				if hasVisibleText {
+					stopReason = "max_tokens"
+				} else {
+					stopReason = "end_turn"
+				}
 			case "STOP", "FINISH_REASON_UNSPECIFIED", "UNKNOWN":
 				stopReason = "end_turn"
 			default:

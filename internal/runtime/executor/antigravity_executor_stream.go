@@ -178,6 +178,23 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			}
 		}
 
+		if isAntigravityGeoError(httpResp.StatusCode, bodyBytes) {
+			closeAntigravityAuthIdleTransports(auth)
+			cooldownDuration := 30 * time.Second
+			if retryAfter, parseErr := helps.ParseRetryDelay(bodyBytes); parseErr == nil && retryAfter != nil && *retryAfter > 0 {
+				cooldownDuration = *retryAfter
+			}
+			if !antigravityCoolingDisabled(auth, e.cfg) {
+				if errMarkCooldown := markAntigravityShortCooldownRequired(ctx, auth, baseModel, time.Now(), cooldownDuration); errMarkCooldown != nil {
+					err = homeKVUnavailableStatusErr(errMarkCooldown)
+					return nil, err
+				}
+				log.Debugf("antigravity executor: geo restriction cooldown (%s) for model %s recorded", cooldownDuration, baseModel)
+			}
+			err = newAntigravityGeoStatusErr(bodyBytes)
+			return nil, err
+		}
+
 		if errClear := clearAntigravityReasoningReplayOnInvalidSignature(ctx, replayScope, httpResp.StatusCode, bodyBytes); errClear != nil {
 			// Report the upstream failure rather than the cleanup failure.
 			logAntigravityReasoningReplayDegraded(replayScope, "invalidate", errClear)

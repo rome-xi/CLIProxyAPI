@@ -26,6 +26,7 @@ type convertGeminiResponseToOpenAIChatParams struct {
 	// FunctionIndex tracks tool call indices per candidate index to support multiple candidates.
 	FunctionIndex        map[int]int
 	SawToolCall          map[int]bool
+	SawVisibleText       map[int]bool
 	UpstreamFinishReason map[int]string
 	SanitizedNameMap     map[string]string
 }
@@ -54,6 +55,7 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 			UnixTimestamp:        0,
 			FunctionIndex:        make(map[int]int),
 			SawToolCall:          make(map[int]bool),
+			SawVisibleText:       make(map[int]bool),
 			UpstreamFinishReason: make(map[int]string),
 			SanitizedNameMap:     util.SanitizedToolNameMap(originalRequestRawJSON),
 		}
@@ -66,6 +68,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 	}
 	if p.SawToolCall == nil {
 		p.SawToolCall = make(map[int]bool)
+	}
+	if p.SawVisibleText == nil {
+		p.SawVisibleText = make(map[int]bool)
 	}
 	if p.UpstreamFinishReason == nil {
 		p.UpstreamFinishReason = make(map[int]string)
@@ -195,6 +200,9 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 						if partResult.Get("thought").Bool() {
 							template, _ = sjson.SetBytes(template, "choices.0.delta.reasoning_content", text)
 						} else {
+							if text != "" {
+								p.SawVisibleText[candidateIndex] = true
+							}
 							template, _ = sjson.SetBytes(template, "choices.0.delta.content", text)
 						}
 					} else if functionCallResult.Exists() {
@@ -259,7 +267,11 @@ func ConvertGeminiResponseToOpenAI(_ context.Context, _ string, originalRequestR
 				if sawToolCall {
 					finishReason = "tool_calls"
 				} else if upstreamFinishReason == "MAX_TOKENS" {
-					finishReason = "max_tokens"
+					if p.SawVisibleText[candidateIndex] {
+						finishReason = "max_tokens"
+					} else {
+						finishReason = "stop"
+					}
 				} else {
 					finishReason = "stop"
 				}
@@ -358,13 +370,14 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 
 			partsResult := candidate.Get("content.parts")
 			hasFunctionCall := false
+			hasTextContent := false
+			hasVisibleText := false
 			if partsResult.IsArray() {
 				partsResults := partsResult.Array()
 				var toolCalls [][]byte
 				var images [][]byte
 				var textContent strings.Builder
 				var reasoningContent strings.Builder
-				hasTextContent := false
 				hasReasoningContent := false
 
 				for i := 0; i < len(partsResults); i++ {
@@ -390,6 +403,9 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 							reasoningContent.WriteString(partTextResult.String())
 						} else {
 							hasTextContent = true
+							if partTextResult.String() != "" {
+								hasVisibleText = true
+							}
 							textContent.WriteString(partTextResult.String())
 						}
 					} else if functionCallResult.Exists() {
@@ -439,6 +455,8 @@ func ConvertGeminiResponseToOpenAINonStream(_ context.Context, _ string, origina
 			if hasFunctionCall {
 				choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "finish_reason", "tool_calls")
 				choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "native_finish_reason", "tool_calls")
+			} else if finishReasonResult := candidate.Get("finishReason"); finishReasonResult.Exists() && finishReasonResult.String() == "MAX_TOKENS" && !hasVisibleText {
+				choiceTemplate, _ = sjson.SetBytes(choiceTemplate, "finish_reason", "stop")
 			}
 
 			// Append the constructed choice to the main choices array.

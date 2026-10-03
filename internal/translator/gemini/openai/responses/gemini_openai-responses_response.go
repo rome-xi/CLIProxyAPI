@@ -92,22 +92,25 @@ func (usage geminiResponsesUsage) JSON() []byte {
 	return out
 }
 
-func geminiResponsesTerminalState(finishReason string) (eventType, status string, incompleteDetails []byte) {
+func geminiResponsesTerminalState(finishReason string, hasVisibleText, hasTools bool) (eventType, status string, incompleteDetails []byte) {
 	if strings.EqualFold(strings.TrimSpace(finishReason), "MAX_TOKENS") {
-		return "response.incomplete", "incomplete", []byte(`{"reason":"max_output_tokens"}`)
+		if hasVisibleText {
+			return "response.incomplete", "incomplete", []byte(`{"reason":"max_output_tokens"}`)
+		}
 	}
 	return "response.completed", "completed", nil
 }
 
 type geminiToResponsesState struct {
 	translatorcommon.ApplyPatchErrorState
-	Seq          int
-	ResponseID   string
-	CreatedAt    int64
-	Started      bool
-	Completed    bool
-	FinishReason string
-	Usage        geminiResponsesUsage
+	Seq            int
+	ResponseID     string
+	CreatedAt      int64
+	Started        bool
+	Completed      bool
+	FinishReason   string
+	Usage          geminiResponsesUsage
+	HasVisibleText bool
 
 	// message aggregation
 	MsgOpened    bool
@@ -1030,6 +1033,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 
 			// Assistant visible text
 			if t := part.Get("text"); t.Exists() && t.String() != "" {
+				st.HasVisibleText = true
 				if signature == "" && st.PendingReasoningSignature != "" && ((st.MsgOpened && !st.MsgClosed) || len(st.WebSearchBufferedDeltas) > 0) {
 					emitTrailingDetachedReasoning(st.PendingReasoningSignature)
 					st.PendingReasoningSignature = ""
@@ -1298,7 +1302,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		if !done && !hasUsage {
 			return out
 		}
-		eventType, status, incompleteDetails := geminiResponsesTerminalState(st.FinishReason)
+		eventType, status, incompleteDetails := geminiResponsesTerminalState(st.FinishReason, st.HasVisibleText && (st.MsgOpened && !st.MsgClosed), len(st.FuncCallIDs) > 0)
 		messageStatus = status
 		if st.PendingReasoningSignature != "" {
 			emitTrailingDetachedReasoning(st.PendingReasoningSignature)
@@ -1534,11 +1538,6 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 
 	// Base response scaffold
 	resp := []byte(`{"id":"","object":"response","created_at":0,"status":"completed","background":false,"error":null,"incomplete_details":null}`)
-	_, status, incompleteDetails := geminiResponsesTerminalState(root.Get("candidates.0.finishReason").String())
-	resp, _ = sjson.SetBytes(resp, "status", status)
-	if incompleteDetails != nil {
-		resp, _ = sjson.SetRawBytes(resp, "incomplete_details", incompleteDetails)
-	}
 
 	// id: prefer provider responseId, otherwise synthesize
 	id := root.Get("responseId").String()
@@ -1918,6 +1917,14 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 	flushReasoningOutput()
 	flushMessageOutput()
+
+	hasVisibleText := activeMessageIndex != -1
+	hasTools := len(functionOutputs) > 0
+	_, status, incompleteDetails := geminiResponsesTerminalState(root.Get("candidates.0.finishReason").String(), hasVisibleText, hasTools)
+	resp, _ = sjson.SetBytes(resp, "status", status)
+	if incompleteDetails != nil {
+		resp, _ = sjson.SetRawBytes(resp, "incomplete_details", incompleteDetails)
+	}
 
 	// Web search handling from groundingMetadata
 	groundingMetadata := ExtractGroundingMetadata(root)

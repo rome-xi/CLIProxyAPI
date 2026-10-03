@@ -290,3 +290,70 @@ func TestConvertGeminiResponseToClaudeNonStream_UsageWithCachedContentTokenCount
 		t.Fatalf("expected usage.output_tokens = 7, got %d. Output: %s", outputTokens, string(output))
 	}
 }
+
+func TestGeminiClaudeMaxTokensHandling(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-test","messages":[{"role":"user","content":"hi"}]}`)
+
+	t.Run("nonstream_thinking_only", func(t *testing.T) {
+		resp := []byte(`{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]},"finishReason":"MAX_TOKENS"}]}`)
+		out := ConvertGeminiResponseToClaudeNonStream(context.Background(), "gemini-test", requestJSON, requestJSON, resp, nil)
+		if got := gjson.GetBytes(out, "stop_reason").String(); got != "end_turn" {
+			t.Fatalf("stop_reason = %q, want end_turn: %s", got, out)
+		}
+	})
+
+	t.Run("nonstream_visible_text", func(t *testing.T) {
+		resp := []byte(`{"candidates":[{"content":{"parts":[{"text":"visible text"}]},"finishReason":"MAX_TOKENS"}]}`)
+		out := ConvertGeminiResponseToClaudeNonStream(context.Background(), "gemini-test", requestJSON, requestJSON, resp, nil)
+		if got := gjson.GetBytes(out, "stop_reason").String(); got != "max_tokens" {
+			t.Fatalf("stop_reason = %q, want max_tokens: %s", got, out)
+		}
+	})
+
+	t.Run("nonstream_tool_calls_priority", func(t *testing.T) {
+		resp := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"test"}}}]},"finishReason":"MAX_TOKENS"}]}`)
+		out := ConvertGeminiResponseToClaudeNonStream(context.Background(), "gemini-test", requestJSON, requestJSON, resp, nil)
+		if got := gjson.GetBytes(out, "stop_reason").String(); got != "tool_use" {
+			t.Fatalf("stop_reason = %q, want tool_use: %s", got, out)
+		}
+	})
+
+	t.Run("stream_thinking_only", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]}}]}`)
+		chunk2 := []byte(`{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}`)
+		_ = ConvertGeminiResponseToClaude(context.Background(), "gemini-test", requestJSON, requestJSON, chunk1, &param)
+		out := ConvertGeminiResponseToClaude(context.Background(), "gemini-test", requestJSON, requestJSON, chunk2, &param)
+		out = append(out, ConvertGeminiResponseToClaude(context.Background(), "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param)...)
+		joined := string(bytes.Join(out, nil))
+		if !strings.Contains(joined, `"stop_reason":"end_turn"`) {
+			t.Fatalf("stream should emit stop_reason end_turn: %s", joined)
+		}
+	})
+
+	t.Run("stream_visible_text", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"candidates":[{"content":{"parts":[{"text":"visible text"}]}}]}`)
+		chunk2 := []byte(`{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}`)
+		_ = ConvertGeminiResponseToClaude(context.Background(), "gemini-test", requestJSON, requestJSON, chunk1, &param)
+		out := ConvertGeminiResponseToClaude(context.Background(), "gemini-test", requestJSON, requestJSON, chunk2, &param)
+		out = append(out, ConvertGeminiResponseToClaude(context.Background(), "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param)...)
+		joined := string(bytes.Join(out, nil))
+		if !strings.Contains(joined, `"stop_reason":"max_tokens"`) {
+			t.Fatalf("stream should emit stop_reason max_tokens: %s", joined)
+		}
+	})
+
+	t.Run("stream_tool_calls_priority", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"test"}}}]}}]}`)
+		chunk2 := []byte(`{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}}`)
+		_ = ConvertGeminiResponseToClaude(context.Background(), "gemini-test", requestJSON, requestJSON, chunk1, &param)
+		out := ConvertGeminiResponseToClaude(context.Background(), "gemini-test", requestJSON, requestJSON, chunk2, &param)
+		out = append(out, ConvertGeminiResponseToClaude(context.Background(), "gemini-test", requestJSON, requestJSON, []byte("[DONE]"), &param)...)
+		joined := string(bytes.Join(out, nil))
+		if !strings.Contains(joined, `"stop_reason":"tool_use"`) {
+			t.Fatalf("stream should emit stop_reason tool_use: %s", joined)
+		}
+	})
+}

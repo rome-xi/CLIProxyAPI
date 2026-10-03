@@ -268,3 +268,106 @@ func TestIssue6258GeminiResponsesSameFrameControl(t *testing.T) {
 	response := issue6258Terminal(t, events)
 	issue6258AssertUsage(t, response, 100, 60, 50, 160, 7)
 }
+
+func TestGeminiResponsesMaxTokens_ThinkingOnly(t *testing.T) {
+	t.Run("stream", func(t *testing.T) {
+		var param any
+		var events []gjson.Result
+		for _, frame := range []string{
+			`{"responseId":"think","candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]}}]}`,
+			`{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":` + issue6258Usage + `}`,
+			`[DONE]`,
+		} {
+			events = append(events, issue6258Translate(t, &param, frame)...)
+		}
+		response := issue6258Terminal(t, events)
+		if got := response.Get("status").String(); got != "completed" {
+			t.Fatalf("status=%q, want completed", got)
+		}
+		if response.Get("incomplete_details.reason").Exists() {
+			t.Fatalf("incomplete_details should not exist: %s", response.Get("incomplete_details").Raw)
+		}
+	})
+
+	t.Run("nonstream", func(t *testing.T) {
+		raw := `{"responseId":"think","candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":` + issue6258Usage + `}`
+		response := gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.7-flash", nil, nil, []byte(raw), nil))
+		if got := response.Get("status").String(); got != "completed" {
+			t.Fatalf("status=%q, want completed", got)
+		}
+		if response.Get("incomplete_details.reason").Exists() {
+			t.Fatalf("incomplete_details should not exist: %s", response.Get("incomplete_details").Raw)
+		}
+	})
+}
+
+func TestGeminiResponsesMaxTokens_Empty(t *testing.T) {
+	t.Run("stream", func(t *testing.T) {
+		var param any
+		var events []gjson.Result
+		for _, frame := range []string{
+			`{"responseId":"empty","candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":` + issue6258Usage + `}`,
+			`[DONE]`,
+		} {
+			events = append(events, issue6258Translate(t, &param, frame)...)
+		}
+		response := issue6258Terminal(t, events)
+		if got := response.Get("status").String(); got != "completed" {
+			t.Fatalf("status=%q, want completed", got)
+		}
+		if response.Get("incomplete_details.reason").Exists() {
+			t.Fatalf("incomplete_details should not exist: %s", response.Get("incomplete_details").Raw)
+		}
+	})
+
+	t.Run("nonstream", func(t *testing.T) {
+		raw := `{"responseId":"empty","candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":` + issue6258Usage + `}`
+		response := gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.7-flash", nil, nil, []byte(raw), nil))
+		if got := response.Get("status").String(); got != "completed" {
+			t.Fatalf("status=%q, want completed", got)
+		}
+		if response.Get("incomplete_details.reason").Exists() {
+			t.Fatalf("incomplete_details should not exist: %s", response.Get("incomplete_details").Raw)
+		}
+	})
+}
+
+func TestGeminiResponsesMaxTokens_ToolOnly(t *testing.T) {
+	t.Run("stream", func(t *testing.T) {
+		var param any
+		var events []gjson.Result
+		for _, frame := range []string{
+			`{"responseId":"tool","candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"lookup","args":{"k":"v"}}}]}}]}`,
+			`{"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":` + issue6258Usage + `}`,
+			`[DONE]`,
+		} {
+			events = append(events, issue6258Translate(t, &param, frame)...)
+		}
+		response := issue6258Terminal(t, events)
+		if got := response.Get("status").String(); got != "completed" {
+			t.Fatalf("status=%q, want completed", got)
+		}
+		if response.Get("incomplete_details.reason").Exists() {
+			t.Fatalf("incomplete_details should not exist: %s", response.Get("incomplete_details").Raw)
+		}
+		items := response.Get("output").Array()
+		if len(items) != 1 || items[0].Get("status").String() != "completed" {
+			t.Fatalf("output items=%s, want 1 completed tool call", response.Get("output").Raw)
+		}
+	})
+
+	t.Run("nonstream", func(t *testing.T) {
+		raw := `{"responseId":"tool","candidates":[{"content":{"parts":[{"functionCall":{"id":"call-1","name":"lookup","args":{"k":"v"}}}]},"finishReason":"MAX_TOKENS"}],"usageMetadata":` + issue6258Usage + `}`
+		response := gjson.ParseBytes(ConvertGeminiResponseToOpenAIResponsesNonStream(context.Background(), "gemini-3.7-flash", nil, nil, []byte(raw), nil))
+		if got := response.Get("status").String(); got != "completed" {
+			t.Fatalf("status=%q, want completed", got)
+		}
+		if response.Get("incomplete_details.reason").Exists() {
+			t.Fatalf("incomplete_details should not exist: %s", response.Get("incomplete_details").Raw)
+		}
+		items := response.Get("output").Array()
+		if len(items) != 1 || items[0].Get("status").String() != "completed" {
+			t.Fatalf("output items=%s, want 1 completed tool call", response.Get("output").Raw)
+		}
+	})
+}

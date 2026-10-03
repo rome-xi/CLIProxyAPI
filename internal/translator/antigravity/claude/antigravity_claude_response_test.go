@@ -1565,3 +1565,78 @@ func TestConvertAntigravityResponseToClaudeStream_EmptyTextPartFollowedByThinkin
 		t.Fatalf("expected exactly 2 stopped blocks (0=thinking, 1=text), got: %v", stopped)
 	}
 }
+
+func TestAntigravityClaudeMaxTokensHandling(t *testing.T) {
+	requestJSON := []byte(`{"model":"gemini-3-flash-agent"}`)
+
+	t.Run("nonstream_thinking_only", func(t *testing.T) {
+		resp := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]},"finishReason":"MAX_TOKENS"}]}}`)
+		out := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, resp, nil)
+		if got := gjson.GetBytes(out, "stop_reason").String(); got != "end_turn" {
+			t.Fatalf("stop_reason = %q, want end_turn: %s", got, out)
+		}
+	})
+
+	t.Run("nonstream_visible_text", func(t *testing.T) {
+		resp := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"visible text"}]},"finishReason":"MAX_TOKENS"}]}}`)
+		out := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, resp, nil)
+		if got := gjson.GetBytes(out, "stop_reason").String(); got != "max_tokens" {
+			t.Fatalf("stop_reason = %q, want max_tokens: %s", got, out)
+		}
+	})
+
+	t.Run("nonstream_tool_calls_priority", func(t *testing.T) {
+		resp := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"test"}}}]},"finishReason":"MAX_TOKENS"}]}}`)
+		out := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, resp, nil)
+		if got := gjson.GetBytes(out, "stop_reason").String(); got != "tool_use" {
+			t.Fatalf("stop_reason = %q, want tool_use: %s", got, out)
+		}
+	})
+
+	t.Run("nonstream_empty_candidate", func(t *testing.T) {
+		resp := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}]}}`)
+		out := ConvertAntigravityResponseToClaudeNonStream(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, resp, nil)
+		if got := gjson.GetBytes(out, "stop_reason").String(); got != "end_turn" {
+			t.Fatalf("stop_reason = %q, want end_turn: %s", got, out)
+		}
+	})
+
+	t.Run("stream_thinking_only", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"thinking...","thought":true}]}}]}}`)
+		chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}]}}`)
+		_ = ConvertAntigravityResponseToClaude(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, chunk1, &param)
+		out := ConvertAntigravityResponseToClaude(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, chunk2, &param)
+		out = append(out, ConvertAntigravityResponseToClaude(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param)...)
+		joined := string(bytes.Join(out, nil))
+		if !strings.Contains(joined, `"stop_reason":"end_turn"`) {
+			t.Fatalf("stream should emit stop_reason end_turn: %s", joined)
+		}
+	})
+
+	t.Run("stream_visible_text", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"text":"visible text"}]}}]}}`)
+		chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}]}}`)
+		_ = ConvertAntigravityResponseToClaude(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, chunk1, &param)
+		out := ConvertAntigravityResponseToClaude(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, chunk2, &param)
+		out = append(out, ConvertAntigravityResponseToClaude(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param)...)
+		joined := string(bytes.Join(out, nil))
+		if !strings.Contains(joined, `"stop_reason":"max_tokens"`) {
+			t.Fatalf("stream should emit stop_reason max_tokens: %s", joined)
+		}
+	})
+
+	t.Run("stream_tool_calls_priority", func(t *testing.T) {
+		var param any
+		chunk1 := []byte(`{"response":{"candidates":[{"content":{"parts":[{"functionCall":{"name":"lookup","args":{"q":"test"}}}]}}]}}`)
+		chunk2 := []byte(`{"response":{"candidates":[{"finishReason":"MAX_TOKENS"}]}}`)
+		_ = ConvertAntigravityResponseToClaude(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, chunk1, &param)
+		out := ConvertAntigravityResponseToClaude(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, chunk2, &param)
+		out = append(out, ConvertAntigravityResponseToClaude(context.Background(), "gemini-3-flash-agent", requestJSON, requestJSON, []byte("[DONE]"), &param)...)
+		joined := string(bytes.Join(out, nil))
+		if !strings.Contains(joined, `"stop_reason":"tool_use"`) {
+			t.Fatalf("stream should emit stop_reason tool_use: %s", joined)
+		}
+	})
+}
